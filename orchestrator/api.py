@@ -25,6 +25,7 @@ from storage.minio_client import MinioStorageClient
 from indexing.document_classifier import classify
 from indexing.metadata_extractor import extract_metadata
 from indexing.models import DocumentType, FileType, models # <--- Import FileType
+from indexing.utils import calculate_file_hash
 # Import OpenSearch mappings
 from storage.opensearch_mappings import mappings as opensearch_doc_mappings
 from qdrant_client import models as qdrant_models # Import qdrant models separately
