@@ -1,0 +1,37 @@
+# --- OpenSearch ---
+OPENSEARCH_HOST=localhost           # Hostname of your OpenSearch node (localhost)
+OPENSEARCH_PORT=9200                # Port of your OpenSearch node (9200)
+# OPENSEARCH_HOSTS_JSON='[{"host": "node1", "port": 9200}, {"host": "node2", "port": 9200}]' # Alternative for multi-node, if implemented
+OPENSEARCH_USER=admin               # Username for OpenSearch auth (None) - SET IF NEEDED
+OPENSEARCH_PASSWORD=admin           # Password for OpenSearch auth (None) - SET IF NEEDED
+OPENSEARCH_USE_SSL=False            # Set to 'true' if OpenSearch uses HTTPS (False)
+OPENSEARCH_VERIFY_CERTS=False       # Set to 'true' to verify OpenSearch SSL certs (False)
+# OPENSEARCH_CA_CERTS=/path/to/ca.pem # Path to CA bundle if verifying certs (None)
+OPENSEARCH_TIMEOUT=30               # Connection timeout in seconds (30)
+OPENSEARCH_INDEX_PREFIX=docs        # Prefix for OpenSearch indices (docs)
+OPENSEARCH_REFRESH_POLICY=wait_for  # Refresh policy: true, false, or wait_for (wait_for)
+# OPENSEARCH_SSL_SHOW_WARN=true     # Suppress SSL warnings if not verifying certs (depends on OPENSEARCH_VERIFY_CERTS)
+
+# --- Qdrant ---
+QDRANT_HOST=localhost               # Hostname for Qdrant (localhost)
+QDRANT_PORT=6333                    # HTTP Port for Qdrant (6333)
+QDRANT_GRPC_PORT=6334               # gRPC Port for Qdrant (6334)
+# QDRANT_LOCATION=":memory:"        # Alternative: URL or :memory: (None) - overrides host/port
+# QDRANT_API_KEY=your_api_key       # Qdrant API Key (None) - SET IF NEEDED
+QDRANT_USE_TLS=False                # Set to 'true' if Qdrant uses TLS (False)
+QDRANT_COLLECTION_PREFIX=colbert_docs # Prefix for Qdrant collections (colbert_docs)
+
+# --- ColBERT Model (Defaults usually fine if using colbert-ir/colbertv2.0) ---
+# COLBERT_VECTOR_DIM=128            # Vector dimension (128)
+# COLBERT_VECTOR_DISTANCE=Cosine    # Distance metric: Cosine, Dot, Euclid (Cosine)
+# COLBERT_COMPARATOR=MaxSim         # Multi-vector comparison method (MaxSim)
+
+# --- MinIO ---
+MINIO_ENDPOINT=localhost:9000       # MinIO server address and port (localhost:9000)
+MINIO_ACCESS_KEY=minioadmin         # MinIO access key (minioadmin) - LIKELY SET THIS
+MINIO_SECRET_KEY=minioadmin         # MinIO secret key (minioadmin) - LIKELY SET THIS
+MINIO_USE_SSL=False                 # Set to 'true' if MinIO uses HTTPS (False)
+MINIO_BUCKET_NAME=documents         # Name of the MinIO bucket (documents)
+
+# --- FastEmbed (Optional) ---
+# FASTEMBED_CACHE_DIR=/path/to/cache # Override default cache location for embedding models (None)

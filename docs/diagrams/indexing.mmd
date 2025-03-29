@@ -1,0 +1,53 @@
+sequenceDiagram
+    participant Client
+    participant Orchestrator
+    participant MinIO
+    participant DocClassifier as Document Classifier
+    participant MetadataExtractor as Metadata Extractor
+    participant OpenSearch
+    participant Qdrant
+    
+    Client->>Orchestrator: index_document(document)
+    
+    Orchestrator->>Orchestrator: preprocess_document(document)
+    
+    Orchestrator->>Orchestrator: generate_file_hash(document)
+    
+    Orchestrator->>MinIO: check_exists(file_hash)
+    MinIO-->>Orchestrator: return exists_in_minio
+    
+    Orchestrator->>OpenSearch: check_exists(file_hash)
+    OpenSearch-->>Orchestrator: return exists_in_opensearch
+    
+    Orchestrator->>Qdrant: check_exists(file_hash)
+    Qdrant-->>Orchestrator: return exists_in_qdrant
+    
+    alt !exists_in_minio
+        Orchestrator->>MinIO: store_document(document, file_hash)
+        MinIO-->>Orchestrator: return storage_status
+    end
+    
+    alt !exists_in_opensearch || !exists_in_qdrant
+        Orchestrator->>DocClassifier: classify_document(document)
+        DocClassifier-->>Orchestrator: return document_type, confidence
+        
+        Orchestrator->>Orchestrator: get_metadata_schema(document_type)
+        
+        Orchestrator->>MetadataExtractor: extract_metadata(document, schema)
+        MetadataExtractor-->>Orchestrator: return metadata
+        
+        Orchestrator->>Orchestrator: chunk_document(document)
+        
+        alt !exists_in_opensearch
+            Orchestrator->>OpenSearch: index(chunks, metadata, minio_link, file_hash)
+            OpenSearch-->>Orchestrator: return index_status
+        end
+            
+        alt !exists_in_qdrant
+            Orchestrator->>Orchestrator: generate_colbert_embeddings(document)
+            Orchestrator->>Qdrant: store_embeddings(embeddings, metadata, file_hash, document_id)
+            Qdrant-->>Orchestrator: return storage_status
+        end
+    end
+    
+    Orchestrator-->>Client: return indexing_status

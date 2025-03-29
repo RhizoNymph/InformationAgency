@@ -1,0 +1,23 @@
+sequenceDiagram
+    participant Client
+    participant Orchestrator
+    participant OpenSearch
+    participant Qdrant
+    
+    Client->>Orchestrator: Search Request
+    Orchestrator->>Orchestrator: Parse query and parameters
+    
+    par Search in parallel
+        Orchestrator->>OpenSearch: Search Query
+        OpenSearch-->>Orchestrator: Return ranked documents
+    and
+        Orchestrator->>Qdrant: Vector Search Query
+        Qdrant-->>Orchestrator: Return ranked embeddings
+    end
+    
+    Orchestrator->>Orchestrator: Perform Reciprocal Rank Fusion (RRF)
+    Orchestrator->>Orchestrator: Combine rankings from both sources
+    Orchestrator->>Orchestrator: Re-rank using RRF algorithm
+    Orchestrator->>Orchestrator: Select top K results
+    
+    Orchestrator-->>Client: Return final ranked results

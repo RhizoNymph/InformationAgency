@@ -1,0 +1,17 @@
+[project]
+name = "informationagency"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.12",
+    "fastembed>=0.6.0",
+    "minio>=7.2.15",
+    "opensearch-py[async]>=2.8.0",
+    "pydantic-ai>=0.0.44",
+    "python-dotenv>=1.1.0",
+    "python-multipart>=0.0.20",
+    "qdrant-client>=1.13.3",
+    "uvicorn>=0.34.0",
+]
