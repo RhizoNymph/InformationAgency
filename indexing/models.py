@@ -3,6 +3,14 @@ from typing import List, Optional
 from datetime import datetime
 from enum import Enum
 
+class FileType(Enum):
+    PDF = "pdf"
+    DOCX = "docx"
+    TXT = "txt"
+    HTML = "html"
+    EPUB = "epub"
+    ODT = "odt"
+
 class DocumentType(Enum):
     BOOK = "book"
     PAPER = "paper"

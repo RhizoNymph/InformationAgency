@@ -10,6 +10,7 @@ dependencies = [
     "minio>=7.2.15",
     "opensearch-py[async]>=2.8.0",
     "pydantic-ai>=0.0.44",
+    "pymupdf>=1.25.4",
     "python-dotenv>=1.1.0",
     "python-multipart>=0.0.20",
     "qdrant-client>=1.13.3",

@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 import numpy as np 
 from datetime import datetime, timezone
+import fitz # <--- Add PyMuPDF import
 
 
 # FastAPI imports
@@ -23,7 +24,7 @@ from storage.opensearch_client import OpenSearchClient
 from storage.minio_client import MinioStorageClient
 from indexing.document_classifier import classify
 from indexing.metadata_extractor import extract_metadata
-from indexing.models import DocumentType, models # Assuming DocumentType enum is in models.py
+from indexing.models import DocumentType, FileType, models # <--- Import FileType
 # Import OpenSearch mappings
 from storage.opensearch_mappings import mappings as opensearch_doc_mappings
 from qdrant_client import models as qdrant_models # Import qdrant models separately
@@ -41,7 +42,7 @@ try:
 except ImportError:
     print("Error: 'fastembed' library not found or ColBERT model unavailable. Install it: pip install 'fastembed>=0.2.0'")
     # Define a dummy model or raise an error to prevent startup without embeddings
-    embedding_model = None # Or raise ImportError("fastembed required")
+    raise ImportError("fastembed required")
 except Exception as e:
      print(f"Error loading embedding model '{colbert_model_name}': {e}")
      embedding_model = None # Handle loading errors
@@ -74,22 +75,6 @@ app = FastAPI(
 
 # --- Helper Functions ---
 
-def calculate_file_hash(file_path: str) -> str:
-    """Calculates the SHA256 hash of a file."""
-    hasher = hashlib.sha256()
-    try:
-        with open(file_path, 'rb') as file:
-            while chunk := file.read(8192):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-    except FileNotFoundError:
-         logger.error(f"File not found when calculating hash: {file_path}")
-         raise
-    except Exception as e:
-         logger.error(f"Error calculating hash for {file_path}: {e}")
-         raise
-
-
 def get_opensearch_mappings(doc_type: DocumentType) -> Dict[str, Any]:
     """Returns the appropriate OpenSearch mappings for the document type."""
     if doc_type == DocumentType.UNKNOWN:
@@ -109,30 +94,114 @@ def get_opensearch_mappings(doc_type: DocumentType) -> Dict[str, Any]:
         return {"properties": opensearch_client.settings.BASE_MAPPING_PROPERTIES}
 
 
-async def chunk_document(file_path: str, doc_type: DocumentType) -> list[str]:
-    """Chunks the document text based on its type."""
-    # Placeholder: Implement document reading (e.g., using PyPDF2, python-docx, unstructured.io)
-    # and chunking strategy (e.g., fixed size, semantic chunking).
-    logger.warning(f"Using placeholder document chunking for {doc_type.value}")
-    try:
-        # Example: Basic text file reading and simple splitting
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        # Simple split by paragraph (adjust as needed)
-        chunks = [p.strip() for p in content.split('\n\n') if p.strip()]
-        if not chunks and content: # If no double newlines, maybe split by single? Or just one big chunk?
-             chunks = [content.strip()]
-        logger.info(f"Placeholder chunking generated {len(chunks)} chunks.")
-        return chunks
-    except Exception as e:
-        logger.error(f"Placeholder chunking failed for {file_path}: {e}")
-        return []
+def get_file_type_from_upload(upload_file: UploadFile) -> FileType:
+    """Determines the FileType based on filename extension or content type."""
+    extension_map = {
+        ".pdf": FileType.PDF,
+        ".txt": FileType.TXT,
+        ".docx": FileType.DOCX,
+        ".html": FileType.HTML,
+        ".htm": FileType.HTML,
+        ".epub": FileType.EPUB,
+        ".odt": FileType.ODT,
+    }
+    filename = upload_file.filename or ""
+    content_type = upload_file.content_type or ""
+    file_extension = os.path.splitext(filename)[1].lower()
 
-async def embed_chunks(chunks: List[str], doc_type: DocumentType) -> List[Tuple[str, np.ndarray]]:
+    if file_extension in extension_map:
+        return extension_map[file_extension]
+
+    # Fallback based on content type
+    if "pdf" in content_type:
+        return FileType.PDF
+    elif "text/plain" in content_type:
+        return FileType.TXT
+    elif "vnd.openxmlformats-officedocument.wordprocessingml.document" in content_type:
+        return FileType.DOCX
+    elif "text/html" in content_type:
+        return FileType.HTML
+    elif "epub+zip" in content_type:
+        return FileType.EPUB
+    elif "vnd.oasis.opendocument.text" in content_type:
+        return FileType.ODT
+
+    logger.warning(f"Could not determine FileType for '{filename}' (type: {content_type}). Defaulting to TXT.")
+    # Consider raising an error or returning a specific 'UNKNOWN_FILETYPE' if needed
+    return FileType.TXT # Or handle unknown type more robustly
+
+
+async def chunk_document(file_path: str, file_type: FileType) -> list[str]:
+    """
+    Chunks the document based on its FileType.
+    Uses PyMuPDF for PDFs, basic text splitting for TXT.
+    Other types are placeholders.
+    """
+    logger.info(f"Starting chunking for file: {file_path}, type: {file_type.value}")
+    chunks = []
+    try:
+        if file_type == FileType.PDF:
+            logger.debug("Processing PDF using PyMuPDF...")
+            try:
+                doc = fitz.open(file_path)
+                for page_num, page in enumerate(doc.pages(), start=1):
+                    page_text = page.get_text("text", sort=True) # Extract text, sorting helps reading order
+                    if page_text:
+                        # Simple chunking: Split page text by double newline, then maybe by single if needed
+                        page_chunks = [p.strip() for p in page_text.split('\n\n') if p.strip()]
+                        if not page_chunks and page_text.strip(): # Fallback for pages without double newlines
+                            page_chunks = [p.strip() for p in page_text.split('\n') if p.strip()]
+                        # Optional: Add page number to chunk metadata later if needed
+                        chunks.extend(page_chunks)
+                doc.close()
+                logger.info(f"PyMuPDF processed {page_num} pages, generated {len(chunks)} initial chunks.")
+            except fitz.EmptyFileError:
+                 logger.error(f"PyMuPDF error: File is empty or invalid PDF: {file_path}")
+                 return [] # Return empty list for empty/invalid PDFs
+            except Exception as pdf_exc: # Catch specific PyMuPDF errors if known, else general Exception
+                 logger.error(f"PyMuPDF failed to process {file_path}: {pdf_exc}", exc_info=True)
+                 raise # Re-raise to be caught by the endpoint handler
+
+        elif file_type == FileType.TXT:
+            logger.debug("Processing TXT file...")
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            # Simple split by paragraph (adjust as needed)
+            chunks = [p.strip() for p in content.split('\n\n') if p.strip()]
+            if not chunks and content.strip(): # If no double newlines, maybe split by single?
+                chunks = [p.strip() for p in content.split('\n') if p.strip()]
+                if not chunks and content.strip(): # Fallback to single large chunk
+                    chunks = [content.strip()]
+            logger.info(f"TXT processing generated {len(chunks)} chunks.")
+
+        else:
+            # Placeholder/Warning for other types
+            logger.warning(f"Chunking not implemented for file type '{file_type.value}'. No chunks generated.")
+            # Consider adding support using libraries like 'python-docx', 'beautifulsoup4', 'unstructured.io'
+            # For now, return empty list for unsupported types.
+            return []
+
+        # Basic post-processing: remove very short chunks (optional)
+        min_chunk_length = 10 # Example threshold
+        final_chunks = [chunk for chunk in chunks if len(chunk) >= min_chunk_length]
+        if len(chunks) != len(final_chunks):
+             logger.debug(f"Removed {len(chunks) - len(final_chunks)} short chunks.")
+
+        logger.info(f"Chunking generated {len(final_chunks)} final chunks for {file_type.value}.")
+        return final_chunks
+
+    except FileNotFoundError:
+         logger.error(f"File not found during chunking: {file_path}")
+         raise # Re-raise to be caught by the endpoint handler
+    except Exception as e:
+        logger.error(f"Chunking failed for {file_path} ({file_type.value}): {e}", exc_info=True)
+        raise # Re-raise
+
+async def embed_chunks(chunks: List[str]) -> List[Tuple[str, np.ndarray]]:
     """
     Generates ColBERT embeddings for text chunks using FastEmbed.
     Returns a list of tuples: (chunk_text, embedding_matrix).
-    """
+    """     
     if not embedding_model:
          logger.error("Embedding model is not available. Cannot embed chunks.")
          raise RuntimeError("Embedding model failed to load or is not configured.")
@@ -320,6 +389,10 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
 
         # --- Indexing Steps (Executed for new files OR files found only in MinIO) ---
 
+        # Determine FileType *before* classification if needed, or just use for chunking
+        file_type = get_file_type_from_upload(file)
+        logger.info(f"Determined file type: {file_type.value}")
+
         # 2. Classify Document (Only if indexing is needed)
         logger.info("Reading sample for classification...")
         try:
@@ -330,7 +403,7 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
 
             if not sample_text.strip():
                  logger.error("File is empty or could not be read for classification.")
-                 raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Cannot classify empty or unreadable file content.")
+                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot classify empty or unreadable file content.")
             doc_type = await classify(sample_text) # Overwrites UNKNOWN default
             logger.info(f"Classified document as: {doc_type.value}")
             if doc_type == DocumentType.UNKNOWN:
@@ -373,17 +446,18 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
             "file_size_bytes": str(file_size), # Stringify
             "content_type": file.content_type or 'application/octet-stream',
             "doc_type": doc_type.value, # Use the classified type
+            "file_type": file_type.value, # Add file_type to metadata if useful
             **extracted_metadata # Merge extracted data
         }
 
-        # 6. Chunk Document
-        logger.info("Chunking document...")
-        text_chunks = await chunk_document(temp_file_path, doc_type)
+        # 6. Chunk Document (Using the determined file_type)
+        logger.info(f"Chunking document ({file_type.value})...")
+        text_chunks = await chunk_document(temp_file_path, file_type) # <--- Pass file_type here
         if not text_chunks:
-             logger.warning("No text chunks were generated. Skipping OS/Qdrant indexing.")
-             # File is in MinIO, but cannot be chunked/indexed further. Return success.
-             # Message should reflect this.
-             return {
+            logger.warning("No text chunks were generated. Skipping OS/Qdrant indexing.")
+            # File is in MinIO, but cannot be chunked/indexed further. Return success.
+            # Message should reflect this.
+            return {
                 "message": f"File '{file.filename}' saved to storage, but no content chunks generated for indexing.",
                 "filename": file.filename,
                 "file_hash": file_hash,
@@ -393,9 +467,9 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
         else:
             logger.info(f"Generated {len(text_chunks)} text chunks.")
 
-             # 7. Generate Embeddings
+             # 7. Generate Embeddings (Pass doc_type as before, embedding model might need it)
             logger.info("Generating embeddings...")
-            chunks_with_embeddings = await embed_chunks(text_chunks, doc_type)
+            chunks_with_embeddings = await embed_chunks(text_chunks)
             # embed_chunks raises RuntimeError or ValueError on failure, caught by main handler
 
             logger.info(f"Generated embeddings for {len(chunks_with_embeddings)} chunks.")
