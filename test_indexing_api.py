@@ -6,7 +6,7 @@ import logging
 # --- Configuration ---
 # Adjust if your API runs on a different host or port
 API_BASE_URL = os.getenv("API_URL", "http://localhost:8000")
-INDEX_ENDPOINT = "/index_document/"  # Assuming this is the correct endpoint path
+INDEX_ENDPOINT = "/index_document"  # Assuming this is the correct endpoint path
 TEST_FILE_PATH = "test.pdf" # Make sure this file exists where you run the script
 REQUEST_TIMEOUT = 120.0 # Timeout in seconds (indexing might take time)
 
