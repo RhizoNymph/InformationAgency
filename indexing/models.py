@@ -20,6 +20,7 @@ class DocumentType(Enum):
     PRESENTATION = "presentation"
     DOCUMENTATION = "documentation"
     PATENT = "patent"
+    UNKNOWN = "unknown"
 
 class BookMetadata(BaseModel):
     """Metadata schema for books"""

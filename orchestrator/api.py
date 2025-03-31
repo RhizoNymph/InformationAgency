@@ -390,35 +390,89 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
 
         # --- Indexing Steps (Executed for new files OR files found only in MinIO) ---
 
-        # Determine FileType *before* classification if needed, or just use for chunking
+        # 1. Determine FileType (Do this first)
         file_type = get_file_type_from_upload(file)
         logger.info(f"Determined file type: {file_type.value}")
 
         # 2. Classify Document (Only if indexing is needed)
-        logger.info("Reading sample for classification...")
+        logger.info("Preparing sample text for classification...")
+        sample_text = "" # Initialize sample_text
         try:
-            # Ensure file is readable, use 'rb' if format is unknown, decode carefully
-            with open(temp_file_path, 'rb') as f:
-                 sample_bytes = f.read(MAX_CLASSIFICATION_SAMPLE_SIZE)
-            sample_text = sample_bytes.decode('utf-8', errors='ignore') # Decode for LLM
+            if file_type == FileType.PDF:
+                logger.debug("Extracting text from PDF for classification using PyMuPDF...")
+                extracted_text = ""
+                try:
+                    doc = fitz.open(temp_file_path)
+                    # Extract text from first few pages until sample size is reached
+                    for page_num, page in enumerate(doc.pages(), start=1):
+                         page_text = page.get_text("text", sort=True).strip()
+                         if page_text:
+                              extracted_text += page_text + "\n\n" # Add separator
+                         if len(extracted_text) >= MAX_CLASSIFICATION_SAMPLE_SIZE:
+                              logger.debug(f"Reached classification sample size limit after page {page_num}.")
+                              break
+                    doc.close()
+                    sample_text = extracted_text[:MAX_CLASSIFICATION_SAMPLE_SIZE] # Trim to exact limit
+                    if not sample_text:
+                         logger.warning(f"No text could be extracted from the first pages of PDF: {file.filename}")
+                except fitz.EmptyFileError:
+                     logger.error(f"PyMuPDF error: File is empty or invalid PDF: {file.filename}")
+                     # Decide how to handle: maybe raise, or classify as UNKNOWN? Let's raise for now.
+                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid or empty PDF file: {file.filename}")
+                except Exception as pdf_exc:
+                     logger.error(f"PyMuPDF failed during text extraction for classification: {pdf_exc}", exc_info=True)
+                     # Re-raise or handle as internal error
+                     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to extract text from PDF for classification.")
 
+            elif file_type == FileType.TXT:
+                 logger.debug("Reading text from TXT file for classification...")
+                 try:
+                      with open(temp_file_path, 'r', encoding='utf-8') as f:
+                           sample_text = f.read(MAX_CLASSIFICATION_SAMPLE_SIZE)
+                 except UnicodeDecodeError:
+                      logger.warning(f"Could not decode TXT file {file.filename} as UTF-8. Trying with errors ignored.")
+                      # Fallback: attempt decoding with error handling
+                      with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                           sample_text = f.read(MAX_CLASSIFICATION_SAMPLE_SIZE)
+                 except Exception as txt_exc:
+                      logger.error(f"Failed to read TXT file for classification: {txt_exc}", exc_info=True)
+                      raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read text file for classification.")
+
+            # Add elif blocks here for other supported file types (DOCX, HTML, etc.) if needed
+            # Use libraries like python-docx, beautifulsoup4, unstructured.io
+
+            else:
+                 # Fallback for unsupported types (or keep the old byte reading method if preferred as last resort)
+                 logger.warning(f"Classification for file type '{file_type.value}' relies on basic byte decoding. Results may be inaccurate.")
+                 try:
+                      with open(temp_file_path, 'rb') as f:
+                           sample_bytes = f.read(MAX_CLASSIFICATION_SAMPLE_SIZE)
+                      sample_text = sample_bytes.decode('utf-8', errors='ignore')
+                 except Exception as fallback_exc:
+                      logger.error(f"Failed fallback read for classification: {fallback_exc}", exc_info=True)
+                      raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read file content for classification.")
+
+            # --- Now use the extracted/read sample_text ---
             if not sample_text.strip():
-                 logger.error("File is empty or could not be read for classification.")
-                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot classify empty or unreadable file content.")
-            doc_type = await classify(sample_text) # Overwrites UNKNOWN default
+                 logger.error(f"File '{file.filename}' resulted in empty sample text for classification.")
+                 # Handle empty content: classify as UNKNOWN or raise error?
+                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot classify empty file content.")
+
+            logger.debug(f"Passing sample text to classifier (first 100 chars): '{sample_text[:100]}...'") # Log beginning of sample
+            doc_type = await classify(sample_text) # Use the correctly prepared sample_text
             logger.info(f"Classified document as: {doc_type.value}")
+
             if doc_type == DocumentType.UNKNOWN:
-                 # Decide how to handle: raise error or index into a default 'unknown' index?
-                 # Let's raise an error for now, requiring classification.
                  raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document type could not be determined or is unsupported. Cannot index.")
+
         except HTTPException as http_exc:
              raise http_exc # Re-raise if classification itself raised HTTP error
         except Exception as e:
-             logger.error(f"Error during classification: {e}", exc_info=True)
-             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to classify document: {e}")
+             logger.error(f"Error during classification phase: {e}", exc_info=True)
+             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed during document classification: {e}")
 
 
-        # 4. Extract Metadata (Only if indexing is needed)
+        # 4. Extract Metadata (This part can remain largely the same, maybe adapt sample reading if needed)
         logger.info("Reading sample for metadata extraction...")
         extracted_metadata = {}
         try:
@@ -572,10 +626,10 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
          raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"A required storage or indexing service is unavailable: {conn_err}")
     except FileNotFoundError:
          logger.error(f"Temporary file not found during processing: {temp_file_path}")
-         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal error: Processing file not found.")
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal error: Processing file not found.")
     except RuntimeError as rt_err: # Catch specific errors like embedding model not loaded
          logger.error(f"Runtime error during processing: {rt_err}", exc_info=True)
-         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal processing error: {rt_err}")
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal processing error: {rt_err}")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         raise HTTPException(
