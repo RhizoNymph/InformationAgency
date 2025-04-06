@@ -332,34 +332,53 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
 
         if hash_exists_in_minio:
             logger.info(f"Hash '{file_hash}' found in MinIO.")
-            # --- Duplicate Check Stage 2: OpenSearch (All Types) ---
-            logger.info("Checking for hash across all OpenSearch document type indices...")
+            # --- Duplicate Check Stage 2: OpenSearch & Qdrant (All Types) ---
+            logger.info("Checking for hash across all OpenSearch document type indices and Qdrant collections...")
             os_hash_found = False
-            # Iterate through all known document types (excluding UNKNOWN)
-            for type_enum in DocumentType:
-                 if type_enum == DocumentType.UNKNOWN:
-                      continue
-                 logger.debug(f"Checking OpenSearch index for type: {type_enum.value}...")
-                 if await opensearch_client.check_hash_exists(file_hash, type_enum.value):
-                      logger.info(f"Hash '{file_hash}' found in OpenSearch index for type '{type_enum.value}'. Document already indexed.")
-                      os_hash_found = True
-                      # Store the found type if needed for the response
-                      doc_type = type_enum
-                      break # Found it, no need to check other types
+            qdrant_hash_found = False
 
-            if os_hash_found:
-                # Already fully indexed (exists in MinIO and OpenSearch)
+            # Run OpenSearch and Qdrant checks concurrently
+            check_results = await asyncio.gather(
+                # OpenSearch check (existing logic)
+                *[opensearch_client.check_hash_exists(file_hash, type_enum.value) 
+                  for type_enum in DocumentType if type_enum != DocumentType.UNKNOWN],
+                # Add Qdrant check
+                *[qdrant_client.check_hash_exists(file_hash, type_enum.value)
+                  for type_enum in DocumentType if type_enum != DocumentType.UNKNOWN],
+                return_exceptions=True
+            )
+
+            # Process OpenSearch results (first half of results)
+            num_doc_types = sum(1 for type_enum in DocumentType if type_enum != DocumentType.UNKNOWN)
+            for i, result in enumerate(check_results[:num_doc_types]):
+                if isinstance(result, Exception):
+                    logger.error(f"OpenSearch check failed for type {i}: {result}")
+                    continue
+                if result:
+                    os_hash_found = True
+                    doc_type = next(type_enum for j, type_enum in enumerate(DocumentType) 
+                                   if type_enum != DocumentType.UNKNOWN and j == i)
+                    break
+
+            # Process Qdrant results (second half of results)
+            for i, result in enumerate(check_results[num_doc_types:]):
+                if isinstance(result, Exception):
+                    logger.error(f"Qdrant check failed for type {i}: {result}")
+                    continue
+                if result:
+                    qdrant_hash_found = True
+                    break
+
+            if os_hash_found and qdrant_hash_found:
+                # Document exists in all systems (MinIO was checked earlier)
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Document with hash '{file_hash}' already exists and is indexed (found in OpenSearch type '{doc_type.value}').",
+                    detail=f"Document with hash '{file_hash}' already exists and is indexed (found in OpenSearch type '{doc_type.value}' and Qdrant).",
                 )
-            else:
-                # Exists in MinIO, but NOT in OpenSearch -> Needs indexing
-                logger.info(f"Hash '{file_hash}' exists in MinIO but not in any OpenSearch index. Proceeding with classification and indexing.")
-                # Proceed to classification, metadata extraction, and indexing (OS & Qdrant)
-                # MinIO upload is skipped as it already exists.
-                # Status code remains 200 OK as we are 'updating' by indexing.
-                pass # Continue to the indexing steps below
+            elif os_hash_found or qdrant_hash_found:
+                # Document exists in some but not all systems - proceed with indexing
+                logger.warning(f"Document found in {'OpenSearch' if os_hash_found else 'Qdrant'} but not in {'Qdrant' if not qdrant_hash_found else 'OpenSearch'}. Proceeding with indexing to ensure consistency.")
+                # Continue with classification and indexing steps
 
         else:
             # Hash NOT found in MinIO -> Completely new file

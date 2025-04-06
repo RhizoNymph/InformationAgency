@@ -45,7 +45,7 @@ class QdrantColbertClient:
                  self._connection_args['api_key'] = settings.QDRANT_API_KEY
         else: # Default to host/port
             self._connection_args['host'] = settings.QDRANT_HOST
-            self._connection_args['port'] = settings.QDRANT_GRPC_PORT # Use gRPC port for async
+            self._connection_args['port'] = settings.QDRANT_PORT  # Use REST API port
             if settings.QDRANT_API_KEY:
                  self._connection_args['api_key'] = settings.QDRANT_API_KEY
             # Handle TLS specifically for host/port if URL wasn't given
@@ -182,15 +182,16 @@ class QdrantColbertClient:
     async def check_hash_exists(self, file_hash: str, doc_type: str) -> bool:
         """
         Checks if any point with the given file_hash exists in the specified collection's payload.
+        Raises ConnectionError if unable to connect to Qdrant.
         """
         if not file_hash or not doc_type:
             logger.warning("check_hash_exists called with empty file_hash or doc_type.")
             return False
 
-        await self._ensure_connected()
-        collection_name = self.get_collection_name(doc_type)
-
         try:
+            await self._ensure_connected()  # This will raise ConnectionError if connection fails
+            collection_name = self.get_collection_name(doc_type)
+
             collections_response = await self.client.get_collections()
             if collection_name not in {col.name for col in collections_response.collections}:
                  logger.debug(f"Collection '{collection_name}' does not exist. Cannot check for hash '{file_hash}'.")
@@ -201,7 +202,7 @@ class QdrantColbertClient:
                 scroll_filter=models.Filter(
                     must=[
                         models.FieldCondition(
-                            key=settings.FIELD_FILE_HASH, # Use constant from settings
+                            key=settings.FIELD_FILE_HASH,
                             match=models.MatchValue(value=file_hash)
                         )
                     ]
@@ -221,10 +222,13 @@ class QdrantColbertClient:
                  logger.warning(f"Collection '{collection_name}' not found during hash check for '{file_hash}'.")
                  return False
             logger.error(f"Qdrant error checking hash '{file_hash}' in '{collection_name}': {e.status_code} - {e.content.decode()}", exc_info=True)
-            return False
+            raise  # Re-raise the error to be handled by caller
+        except ConnectionError as e:
+            logger.error(f"Connection error while checking hash in Qdrant: {e}")
+            raise  # Re-raise connection errors
         except Exception as e:
             logger.error(f"Unexpected error checking hash '{file_hash}' in '{collection_name}': {e}", exc_info=True)
-            return False
+            raise  # Re-raise unexpected errors
 
 
     async def index_document_points(self, points: List[models.PointStruct], doc_type: str) -> bool:
