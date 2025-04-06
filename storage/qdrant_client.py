@@ -96,7 +96,7 @@ class QdrantColbertClient:
         try:
             logger.info(f"Attempting to connect to Qdrant with args: {self._connection_args}")
             self.client = AsyncQdrantClient(**self._connection_args)
-            await self.client.health_check() # Use explicit health check
+            await self.client.get_collections()
             logger.info("Successfully connected to Qdrant.")
             return True
         except Exception as e:
