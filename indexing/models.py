@@ -14,91 +14,70 @@ class FileType(Enum):
 class DocumentType(Enum):
     BOOK = "book"
     PAPER = "paper"
-    BLOG_ARTICLE = "blog_article"
-    TECHNICAL_REPORT = "technical_report"
+    BLOG_ARTICLE = "blog_article"    
     THESIS = "thesis"
     PRESENTATION = "presentation"
     DOCUMENTATION = "documentation"
     PATENT = "patent"
     UNKNOWN = "unknown"
 
-class BookMetadata(BaseModel):
-    """Metadata schema for books"""
-    title: str = Field(description="The full title of the book")
+# Base model for common metadata fields useful for filtering
+class BaseDocumentMetadata(BaseModel):
+    title: str = Field(description="The title of the document")
     authors: List[str] = Field(description="List of author names")
-    publisher: Optional[str] = Field(description="Name of the publishing company")
-    publication_year: Optional[int] = Field(description="Year the book was published")
-    isbn: Optional[str] = Field(description="ISBN number if available")
-    edition: Optional[str] = Field(description="Edition information if available")
-    language: Optional[str] = Field(description="Primary language of the book")
-    subject_areas: List[str] = Field(description="Main subject areas or categories")
-    table_of_contents: Optional[List[str]] = Field(description="Main chapter titles")
-
-class PaperMetadata(BaseModel):
-    """Metadata schema for academic papers"""
-    title: str = Field(description="The full title of the paper")
-    authors: List[str] = Field(description="List of author names")
-    abstract: str = Field(description="Paper abstract")
+    publication_date: Optional[datetime] = Field(description="Publication date of the document")
     keywords: List[str] = Field(description="Keywords or subject terms")
+    language: Optional[str] = Field(description="Language of the document")
+
+class BookMetadata(BaseDocumentMetadata):
+    """Simplified metadata schema for books"""
+    publisher: Optional[str] = Field(description="Name of the publishing company")    
+    isbn: Optional[str] = Field(description="ISBN number if available")
+
+class PaperMetadata(BaseDocumentMetadata):
+    """Simplified metadata schema for academic papers"""    
     doi: Optional[str] = Field(description="Digital Object Identifier")
+    abstract: Optional[str] = Field(description="Abstract of the paper")
     journal: Optional[str] = Field(description="Journal name if published")
     conference: Optional[str] = Field(description="Conference name if presented")
-    publication_year: Optional[int] = Field(description="Year published/presented")
     institution: Optional[str] = Field(description="Research institution(s)")
-    citations: Optional[List[str]] = Field(description="Key citations from first page")
+    citation_count: Optional[int] = Field(description="Number of citations")
 
-class BlogArticleMetadata(BaseModel):
-    """Metadata schema for blog articles"""
-    title: str = Field(description="The full title of the article")
-    authors: List[str] = Field(description="List of author names")
-    publication_date: Optional[datetime] = Field(description="Publication date")
-    blog_name: Optional[str] = Field(description="Name of the blog or platform")
-    url: Optional[str] = Field(description="Original URL if available")
-    tags: List[str] = Field(description="Article tags or categories")
-    reading_time: Optional[int] = Field(description="Estimated reading time in minutes")
-    summary: str = Field(description="Article summary or introduction")
-    series: Optional[str] = Field(description="Blog post series name if part of one")
+class BlogArticleMetadata(BaseDocumentMetadata):
+    """Simplified metadata schema for blog articles"""
+    blog_name: str = Field(description="Name of the blog or platform")    
 
-class TechnicalReportMetadata(BaseModel):
-    """Metadata schema for technical reports"""
-    title: str = Field(description="Report title")
-    authors: List[str] = Field(description="List of authors")
-    organization: str = Field(description="Organization that produced the report")
-    report_number: Optional[str] = Field(description="Report identifier/number")
-    date: Optional[datetime] = Field(description="Publication date")
-    executive_summary: Optional[str] = Field(description="Executive summary")
-    keywords: List[str] = Field(description="Key terms")
-    classification: Optional[str] = Field(description="Report classification (e.g., Internal, Public)")
-
-class ThesisMetadata(BaseModel):
-    """Metadata schema for theses and dissertations"""
-    title: str = Field(description="Thesis title")
-    author: str = Field(description="Author name")
+class ThesisMetadata(BaseDocumentMetadata):
+    """Simplified metadata schema for theses and dissertations"""
     degree: str = Field(description="Degree type (e.g., PhD, Masters)")
     institution: str = Field(description="Academic institution")
-    department: Optional[str] = Field(description="Department or faculty")
-    year: int = Field(description="Year of submission")
-    advisors: List[str] = Field(description="Thesis advisors/supervisors")
-    abstract: str = Field(description="Thesis abstract")
-    keywords: List[str] = Field(description="Key terms")
+    citation_count: Optional[int] = Field(description="Number of citations")
 
-class PatentMetadata(BaseModel):
-    """Metadata schema for patents"""
-    title: str = Field(description="Patent title")
-    inventors: List[str] = Field(description="List of inventors")
+class PatentMetadata(BaseDocumentMetadata):
+    """Simplified metadata schema for patents"""
     assignee: Optional[str] = Field(description="Patent assignee/owner")
     patent_number: Optional[str] = Field(description="Patent number")
     filing_date: Optional[datetime] = Field(description="Filing date")
-    publication_date: Optional[datetime] = Field(description="Publication date")
-    abstract: str = Field(description="Patent abstract")
     classification: Optional[str] = Field(description="Patent classification")
-    claims: Optional[List[str]] = Field(description="Main patent claims")
 
+class PresentationMetadata(BaseDocumentMetadata):
+    """Simplified metadata schema for presentations"""
+    event_name: Optional[str] = Field(description="Name of the conference, meeting, or event")
+
+class DocumentationMetadata(BaseDocumentMetadata):
+    """Simplified metadata schema for technical documentation"""
+    product_name: str = Field(description="Name of the software or product documented")
+    version: Optional[str] = Field(description="Version of the software or product documented")
+    project_url: Optional[str] = Field(description="URL for the project or product website")
+
+# Mapping from DocumentType to the corresponding metadata model
 models = {
     DocumentType.BOOK: BookMetadata,
     DocumentType.PAPER: PaperMetadata,
     DocumentType.BLOG_ARTICLE: BlogArticleMetadata,
-    DocumentType.TECHNICAL_REPORT: TechnicalReportMetadata,
     DocumentType.THESIS: ThesisMetadata,
     DocumentType.PATENT: PatentMetadata,
+    DocumentType.PRESENTATION: PresentationMetadata,
+    DocumentType.DOCUMENTATION: DocumentationMetadata,    
+    DocumentType.UNKNOWN: BaseDocumentMetadata
 }

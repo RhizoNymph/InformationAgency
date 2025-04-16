@@ -1,0 +1,1 @@
+docker compose down orchestrator && docker compose up orchestrator -d --force-recreate --build && docker compose logs -f orchestrator

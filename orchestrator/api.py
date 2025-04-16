@@ -491,27 +491,70 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
              raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed during document classification: {e}")
 
 
-        # 4. Extract Metadata (This part can remain largely the same, maybe adapt sample reading if needed)
+        # 4. Extract Metadata
         logger.info("Reading sample for metadata extraction...")
         extracted_metadata = {}
+        metadata_sample = "" # Initialize sample text
         try:
-            # Adjust reading based on how metadata_extractor expects input
-            with open(temp_file_path, 'rb') as f:
-                 metadata_bytes = f.read(MAX_METADATA_SAMPLE_SIZE)
-            metadata_sample = metadata_bytes.decode('utf-8', errors='ignore')
+            # Extract text based on file_type for metadata sample
+            if file_type == FileType.PDF:
+                logger.debug("Extracting text from PDF for metadata using PyMuPDF...")
+                extracted_text = ""
+                try:
+                    doc = fitz.open(temp_file_path)
+                    for page_num, page in enumerate(doc.pages(), start=1):
+                        page_text = page.get_text("text", sort=True).strip()
+                        if page_text:
+                            extracted_text += page_text + "\n\n" # Add separator
+                        if len(extracted_text) >= MAX_METADATA_SAMPLE_SIZE:
+                            logger.debug(f"Reached metadata sample size limit after page {page_num}.")
+                            break
+                    doc.close()
+                    metadata_sample = extracted_text[:MAX_METADATA_SAMPLE_SIZE] # Trim to exact limit
+                    if not metadata_sample:
+                        logger.warning(f"No text could be extracted from PDF for metadata: {file.filename}")
+                except fitz.EmptyFileError:
+                     logger.error(f"PyMuPDF error (metadata): File is empty or invalid PDF: {file.filename}")
+                     # Decide if this should be fatal, or just skip metadata. Skipping for now.
+                except Exception as pdf_exc:
+                     logger.warning(f"PyMuPDF failed during text extraction for metadata: {pdf_exc}. Proceeding without extracted metadata.", exc_info=True)
 
+            elif file_type == FileType.TXT:
+                 logger.debug("Reading text from TXT file for metadata...")
+                 try:
+                      with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                           metadata_sample = f.read(MAX_METADATA_SAMPLE_SIZE)
+                 except Exception as txt_exc:
+                      logger.warning(f"Failed to read TXT file for metadata: {txt_exc}. Proceeding without extracted metadata.", exc_info=True)
+
+            # Add elif blocks here for other supported file types if needed
+
+            else:
+                 # Fallback for unsupported types (maybe try byte decoding as last resort?)
+                 logger.warning(f"Metadata extraction for file type '{file_type.value}' relies on basic byte decoding. Results may be inaccurate.")
+                 try:
+                      with open(temp_file_path, 'rb') as f:
+                           metadata_bytes = f.read(MAX_METADATA_SAMPLE_SIZE)
+                      metadata_sample = metadata_bytes.decode('utf-8', errors='ignore')
+                 except Exception as fallback_exc:
+                      logger.warning(f"Failed fallback read for metadata: {fallback_exc}. Proceeding without extracted metadata.", exc_info=True)
+
+            # --- Use the extracted/read metadata_sample ---
             if not metadata_sample.strip():
                  logger.warning("Could not read sample for metadata extraction. Proceeding without.")
             else:
+                 logger.debug(f"Passing metadata sample to extractor (first 100 chars): '{metadata_sample[:100]}...'")
                  metadata_model = await extract_metadata(metadata_sample, doc_type)
                  if metadata_model:
                       extracted_metadata = metadata_model.model_dump(exclude_unset=True)
+                      logger.info(f"Extracted metadata: {extracted_metadata}")
                  else:
                       logger.warning("Metadata extraction returned None.")
-            logger.info(f"Extracted metadata: {extracted_metadata}")
+
         except Exception as e:
-             logger.warning(f"Metadata extraction failed: {e}. Proceeding without extracted metadata.", exc_info=True)
-             # Keep extracted_metadata as {}
+             # Catch any unexpected error during the extraction process itself
+             logger.warning(f"Metadata extraction phase failed unexpectedly: {e}. Proceeding without extracted metadata.", exc_info=True)
+             extracted_metadata = {} # Ensure it's empty
 
         # Combine metadata for indexing (OS & Qdrant)
         # Base info + classified type + extracted info
@@ -591,20 +634,20 @@ async def index_document_flow(file: Annotated[UploadFile, File(description="The 
                      qdrant_client.settings.FIELD_TIMESTAMP: datetime.now(timezone.utc).isoformat(),
                      qdrant_client.settings.FIELD_CONTENT: chunk_text # Include chunk text if needed
                  })
-                 point_id = f"{file_hash}_{i}"
-                 # Explicit flatten needed based on PointStruct definition
-                 flat_vector = embedding_matrix.flatten().tolist()
+                 # point_id = f"{file_hash}_{i}" # <-- INVALID ID format
+                 # Use integer chunk index as ID (valid format for Qdrant)
+                 # File hash and chunk index are in payload for linking.
 
                  points_to_upload.append(qdrant_models.PointStruct(
-                    id=point_id,
-                    vector=flat_vector,
+                    id=i, # <-- USE INTEGER INDEX i AS ID
+                    vector=embedding_matrix.tolist(),
                     payload=payload
                  ))
 
             if not points_to_upload:
                  logger.warning(f"No valid points with embeddings generated for Qdrant indexing for hash {file_hash}.")
                  # Don't raise error, just skip Qdrant indexing if no valid points
-            else:                
+            else:
                  qdrant_index_success = await qdrant_client.index_document_points(
                      points=points_to_upload,
                      doc_type=doc_type.value

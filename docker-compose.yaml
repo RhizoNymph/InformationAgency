@@ -14,6 +14,9 @@ services:
     ports:
       - "8000:8000"
     environment:
+      MODEL_NAME: './models/gemma-3-27b-it-q4_0.gguf'
+      OPENAI_BASE_URL: 'http://10.1.100.123:8080/v1/'
+      OPENAI_API_KEY: 'llama'
       OPENSEARCH_HOST: 'opensearch-node1'
       OPENSEARCH_PORT: 9200
       QDRANT_HOST: 'qdrant'

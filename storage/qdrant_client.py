@@ -231,10 +231,18 @@ class QdrantColbertClient:
             raise  # Re-raise unexpected errors
 
 
-    async def index_document_points(self, points: List[models.PointStruct], doc_type: str) -> bool:
+    async def index_document_points(self, points: List[models.PointStruct], doc_type: str, batch_size: int = 100) -> bool:
         """
-        Indexes a list of pre-formatted PointStruct objects into the specified collection.
-        Ensures the collection exists before indexing.
+        Indexes a list of pre-formatted PointStruct objects into the specified collection,
+        using batching to handle potentially large uploads.
+
+        Args:
+            points: The list of PointStruct objects to index.
+            doc_type: The target document type (determines collection name).
+            batch_size: The number of points to upload in each batch.
+
+        Returns:
+            True if all batches were indexed successfully, False otherwise.
         """
         if not doc_type:
             logger.error("index_document_points called with empty doc_type.")
@@ -242,34 +250,56 @@ class QdrantColbertClient:
 
         await self._ensure_connected()
         collection_name = self.get_collection_name(doc_type)
+        all_successful = True
+
         try:
             await self.create_collection_if_not_exists(doc_type) # Ensure collection exists
 
             if not points:
                 logger.warning(f"index_document_points called with empty points list for {doc_type}. Nothing to index.")
-                return True # Or False depending on desired behavior for empty input
+                return True # Nothing to do, considered successful
 
-            logger.info(f"Uploading {len(points)} pre-prepared points to collection '{collection_name}'...")
-            response = await self.client.upsert(
-                collection_name=collection_name,
-                points=points,
-                wait=True # Wait for operation to complete
-            )
-            if response.status == models.UpdateStatus.COMPLETED:
-                logger.info(f"Successfully indexed points into '{collection_name}'. Status: {response.status}")
-                return True
+            total_points = len(points)
+            logger.info(f"Starting batched upload of {total_points} points to collection '{collection_name}' (batch size: {batch_size})...")
+
+            for i in range(0, total_points, batch_size):
+                batch = points[i:i + batch_size]
+                batch_num = (i // batch_size) + 1
+                num_batches = (total_points + batch_size - 1) // batch_size
+                logger.info(f"Uploading batch {batch_num}/{num_batches} ({len(batch)} points) to '{collection_name}'...")
+
+                response = await self.client.upsert(
+                    collection_name=collection_name,
+                    points=batch,
+                    wait=True # Wait for operation to complete for this batch
+                )
+
+                if response.status == models.UpdateStatus.COMPLETED:
+                    logger.info(f"Batch {batch_num}/{num_batches} indexed successfully into '{collection_name}'.")
+                else:
+                    logger.error(f"Failed to index batch {batch_num}/{num_batches} into '{collection_name}'. Status: {response.status}")
+                    all_successful = False
+                    # Decide whether to continue with other batches or stop on first failure
+                    # For now, we'll log the error and continue, returning False at the end
+                    # break # Uncomment to stop on first batch failure
+
+            if all_successful:
+                 logger.info(f"Successfully indexed all {total_points} points in {num_batches} batches into '{collection_name}'.")
             else:
-                # Log potential errors if status is not completed
-                logger.error(f"Failed to index points into '{collection_name}'. Status: {response.status}")
-                return False
+                 logger.error(f"One or more batches failed during indexing to '{collection_name}'.")
+
+            return all_successful
+
         except UnexpectedResponse as e:
-             logger.error(f"Qdrant API error during indexing points into {collection_name}: {e.status_code} - {e.content.decode()}", exc_info=True)
+             logger.error(f"Qdrant API error during batched indexing into {collection_name} (batch {batch_num}): {e.status_code} - {e.content.decode()}", exc_info=True)
              return False
         except ConnectionError as e:
-             logger.error(f"Connection error indexing points into {collection_name}: {e}")
+             logger.error(f"Connection error during batched indexing into {collection_name} (batch {batch_num}): {e}")
              return False
         except Exception as e:
-            logger.error(f"Unexpected error indexing points into {collection_name}: {e}", exc_info=True)
+            # Log batch number if possible, though it might be outside the loop on some errors
+            current_batch_info = f" (processing batch starting at index {i})" if 'i' in locals() else ""
+            logger.error(f"Unexpected error during batched indexing into {collection_name}{current_batch_info}: {e}", exc_info=True)
             return False
 
     # --- NEW: Search Method ---

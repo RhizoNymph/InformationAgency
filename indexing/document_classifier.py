@@ -44,7 +44,7 @@ class DocTypeResponse(BaseModel):
 SYSTEM_PROMPT = """
 You are a document classification specialist. Analyze the provided text sample (first ~3000 characters) from a document and determine its type.
 Choose ONE from the following categories:
-BOOK, PAPER, BLOG_ARTICLE, TECHNICAL_REPORT, THESIS, PRESENTATION, DOCUMENTATION, PATENT.
+BOOK, PAPER, BLOG_ARTICLE, THESIS, PRESENTATION, DOCUMENTATION, PATENT.
 If unsure or it doesn't fit well, classify as UNKNOWN.
 
 Return ONLY a valid JSON object containing the classification. The JSON object must have exactly one key, "document_type", whose value is the chosen category string (e.g., "PAPER", "BOOK", "UNKNOWN").
@@ -89,7 +89,7 @@ async def classify(text_sample: str) -> DocumentType:
                 response_format={"type": "json_object"},
                 temperature=0.2, # Lower temperature for more deterministic classification
             )
-
+            
             # --- Extract and Parse Content ---
             llm_output_str = response.choices[0].message.content
             if not llm_output_str:
