@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np # Added for type hinting embedding matrices
+import asyncio
 
 # Use Qdrant client, prefer async for consistency
 from qdrant_client import QdrantClient as SyncQdrantClient # Sync client for specific tasks if needed
@@ -308,106 +309,101 @@ class QdrantColbertClient:
         query_vector: List[float], # Expect flattened query vector
         k: int = 10,
         doc_type: Optional[str] = None
-    ) -> List[Tuple[str, float]]:
+    ) -> List[Tuple[str, float, dict]]:
         """
-        Performs a vector search using the provided flattened query vector.
-
-        Args:
-            query_vector (List[float]): The flattened embedding vector of the query.
-            k (int): The maximum number of results to return.
-            doc_type (Optional[str]): If provided, searches only the collection
-                                      for this document type. Otherwise, searches
-                                      across all collections matching the prefix.
-
-        Returns:
-            List[Tuple[str, float]]: A list of (document_id, score) tuples.
-                                     Score is the similarity score from Qdrant.
+        Searches relevant Qdrant collections for the query vector.
+        If doc_type is provided, searches only that collection.
+        Otherwise, searches all collections matching the prefix.
+        Returns a list of tuples: (chunk_id, score, payload).
         """
         await self._ensure_connected()
-        search_results: List[models.ScoredPoint] = []
 
-        try:
-            if doc_type:
-                # Search a single specific collection
-                collection_name = self.get_collection_name(doc_type)
-                logger.info(f"Searching Qdrant collection '{collection_name}' (k={k})...")
-                # Check if collection exists before searching to avoid 404
-                try:
-                     await self.client.get_collection(collection_name)
-                except (UnexpectedResponse, ValueError) as e:
-                     # Handle collection not found gracefully (e.g., ValueError in some client versions)
-                     if isinstance(e, UnexpectedResponse) and e.status_code == 404:
-                          logger.warning(f"Collection '{collection_name}' not found for searching.")
-                          return []
-                     elif "not found" in str(e).lower(): # Handle ValueError case
-                          logger.warning(f"Collection '{collection_name}' not found for searching.")
-                          return []
-                     else:
-                          raise # Re-raise other errors
-
-                search_results = await self.client.search(
-                    collection_name=collection_name,
-                    query_vector=query_vector,
-                    limit=k,
-                    with_payload=False, # Don't need payload for RRF stage
-                    with_vectors=False
-                )
-                logger.info(f"Qdrant search in '{collection_name}' yielded {len(search_results)} results.")
-
-            else:
-                # Search across multiple collections matching the prefix
-                logger.info(f"Searching Qdrant collections matching prefix '{self.collection_prefix}_*' (k={k})...")
+        target_collections = []
+        if doc_type:
+            collection_name = self.get_collection_name(doc_type)
+            # Check if the specific collection exists
+            try:
+                collection_info = await self.client.get_collection(collection_name)
+                target_collections.append(collection_name)
+                logger.info(f"Targeting specific Qdrant collection: {collection_name}")
+            except UnexpectedResponse as e:
+                if e.status_code == 404:
+                    logger.error(f"Target Qdrant collection '{collection_name}' for doc_type '{doc_type}' not found.")
+                    return []
+                else:
+                    logger.error(f"Error checking Qdrant collection '{collection_name}': {e.status_code} - {e.content.decode()}", exc_info=True)
+                    return []
+            except Exception as e:
+                 logger.error(f"Unexpected error checking Qdrant collection '{collection_name}': {e}", exc_info=True)
+                 return []
+        else:
+            # Search across all collections matching the prefix
+            try:
                 collections_response = await self.client.get_collections()
                 target_collections = [
                     col.name for col in collections_response.collections
                     if col.name.startswith(self.collection_prefix + "_")
                 ]
-
                 if not target_collections:
                     logger.warning(f"No Qdrant collections found matching prefix '{self.collection_prefix}_*'.")
                     return []
+                logger.info(f"Found target collections for multi-collection search: {target_collections}")
+            except Exception as e:
+                logger.error(f"Failed to list Qdrant collections: {e}", exc_info=True)
+                return []
 
-                logger.info(f"Found target collections for batch search: {target_collections}")
-
-                # Prepare batch search requests
-                search_queries = [
-                    models.SearchRequest(
-                        vector=query_vector,
-                        limit=k,
-                        with_payload=False,
-                        with_vector=False
-                    ) for _ in target_collections # Same query for all target collections
-                ]
-
-                batch_results = await self.client.search_batch(
-                    collection_names=target_collections,
-                    requests=search_queries
+        aggregated_results: List[models.ScoredPoint] = []
+        try:
+            # Perform individual searches for each target collection
+            search_tasks = []
+            for collection_name in target_collections:
+                search_tasks.append(
+                    self.client.search(
+                        collection_name=collection_name,
+                        query_vector=query_vector,
+                        limit=k, # Fetch k from each initially
+                        with_payload=True, # <-- Fetch payload
+                        with_vectors=False # <-- Corrected argument name
+                    )
                 )
 
-                # Aggregate results from all collections in the batch
-                aggregated_results = []
-                for collection_result_list in batch_results:
-                    aggregated_results.extend(collection_result_list)
+            # Run searches concurrently
+            results_per_collection = await asyncio.gather(*search_tasks, return_exceptions=True)
 
-                # Re-sort the aggregated results by score and take top K
-                aggregated_results.sort(key=lambda hit: hit.score, reverse=True)
-                search_results = aggregated_results[:k]
-                logger.info(f"Qdrant batch search yielded {len(search_results)} top results after aggregation.")
+            # Aggregate results
+            for i, result_list in enumerate(results_per_collection):
+                collection_name = target_collections[i]
+                if isinstance(result_list, Exception):
+                    logger.error(f"Search failed for Qdrant collection '{collection_name}': {result_list}")
+                elif isinstance(result_list, list):
+                    logger.debug(f"Qdrant search in '{collection_name}' returned {len(result_list)} hits.")
+                    aggregated_results.extend(result_list)
+                else:
+                    logger.warning(f"Unexpected result type from Qdrant search in '{collection_name}': {type(result_list)}")
 
-            # Format results into List[Tuple[str, float]]
+            if not aggregated_results:
+                logger.info("Qdrant search yielded no results across all targeted collections.")
+                return []
+
+            # Re-sort the aggregated results by score and take top K
+            aggregated_results.sort(key=lambda hit: hit.score, reverse=True)
+            top_k_results = aggregated_results[:k]
+            logger.info(f"Qdrant search yielded {len(top_k_results)} top results after aggregation and sorting.")
+
+            # Format results into List[Tuple[str, float, dict]]
             formatted_results = []
-            for hit in search_results:
+            for hit in top_k_results:
                  # Ensure hit.id is a string, Qdrant IDs can be int or UUID
                  doc_id = str(hit.id)
                  score = hit.score
-                 formatted_results.append((doc_id, float(score)))
+                 payload = hit.payload if hit.payload else {}
+                 formatted_results.append((doc_id, float(score), payload)) # <-- Include payload
 
             return formatted_results
 
         except UnexpectedResponse as e:
-             # Handle potential API errors during search
              logger.error(f"Qdrant API error during search: {e.status_code} - {e.content.decode()}", exc_info=True)
-             return [] # Return empty list on error
+             return []
         except ConnectionError as e:
              logger.error(f"Connection error during Qdrant search: {e}")
              return []

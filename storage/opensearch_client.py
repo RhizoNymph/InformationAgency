@@ -241,28 +241,23 @@ class OpenSearchClient:
         query_text: str,
         k: int = 10,
         doc_type: Optional[str] = None
-    ) -> List[Tuple[str, float]]:
+    ) -> List[Tuple[str, float, dict]]:
         """
-        Performs a text search using a 'match' query against the content field.
-
-        Args:
-            query_text (str): The text to search for.
-            k (int): The maximum number of results to return.
-            doc_type (Optional[str]): If provided, searches only the index
-                                      for this document type. Otherwise, searches
-                                      across all indices matching the prefix.
-
-        Returns:
-            List[Tuple[str, float]]: A list of (document_id, score) tuples.
+        Performs a simple keyword search using a match query.
+        If doc_type is provided, searches only that index.
+        Otherwise, searches all indices matching the prefix.
+        Returns a list of tuples: (doc_id, score, payload).
         """
         await self._ensure_connected()
 
         if doc_type:
             target_index = self.get_index_name(doc_type)
+            logger.info(f"Targeting specific OpenSearch index: {target_index}")
         else:
             target_index = f"{self.index_prefix}_*"
             logger.info(f"Searching across indices matching prefix: {target_index}")
 
+        # Simple match query against the content field
         search_body = {
             "size": k,
             "query": {
@@ -273,6 +268,7 @@ class OpenSearchClient:
                     }
                 }
             }
+            # _source includes all fields by default, no need to specify unless excluding
         }
 
         try:
@@ -288,8 +284,9 @@ class OpenSearchClient:
             for hit in hits:
                 doc_id = hit.get('_id')
                 score = hit.get('_score')
-                if doc_id is not None and score is not None:
-                    results.append((doc_id, float(score)))
+                source = hit.get('_source') # <-- Get the payload
+                if doc_id is not None and score is not None and source is not None:
+                    results.append((doc_id, float(score), source)) # <-- Include payload
 
             logger.info(f"OpenSearch search yielded {len(results)} results.")
             return results

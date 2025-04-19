@@ -712,49 +712,45 @@ async def search_documents(
     query: str,
     k: int = 10, # Number of results to return
     doc_type: Optional[str] = None, # Optional: Filter by specific document type
-    # fetch_k: int = 50, # Number of results to fetch initially from each source
     rrf_k: int = 60, # Constant for RRF calculation
-    # include_metadata: bool = True # Flag to fetch full metadata
 ):
     """
-    Searches for documents using a hybrid approach (text + vector)
-    and combines results using Reciprocal Rank Fusion (RRF).
+    Searches for documents using a hybrid approach (text + vector),
+    combines results using Reciprocal Rank Fusion (RRF), and returns
+    ranked results including chunk content and metadata.
     """
     if not query:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Query parameter cannot be empty.")
     if not embedding_model:
          raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Embedding model not available.")
 
-    # Define how many results to fetch initially from each source
-    # Fetching more than 'k' initially gives RRF more data to work with
-    initial_fetch_k = max(k * 3, 50) # Fetch more results initially, e.g., 3*k or 50
-
+    initial_fetch_k = max(k * 3, 50)
     logger.info(f"Received search query: '{query}', k={k}, doc_type={doc_type}, initial_fetch_k={initial_fetch_k}, rrf_k={rrf_k}")
 
     # --- 1. Embed the Query for Qdrant ---
     try:
         logger.debug("Embedding query for vector search...")
-        # FastEmbed ColBERT might just use embed, check its specific API if needed
-        # It returns a generator, get the first (and only) item
-        query_embedding_generator = embedding_model.embed([query], is_query=True) # Indicate it's a query if API supports it
+        query_embedding_generator = embedding_model.embed([query], is_query=True)
         query_embedding_matrix = next(query_embedding_generator, None)
-
         if query_embedding_matrix is None or not isinstance(query_embedding_matrix, np.ndarray):
              raise ValueError("Failed to generate valid query embedding matrix.")
-
-        # Flatten for Qdrant search (assuming client expects flat list)
         query_vector = query_embedding_matrix.flatten().tolist()
         logger.debug(f"Query vector generated (shape: {query_embedding_matrix.shape}).")
     except Exception as e:
         logger.error(f"Failed to embed query '{query}': {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to embed query: {e}")
 
-    # --- 2. Perform Searches Concurrently ---
+    # --- 2. Perform Searches Concurrently and Collect Payloads ---
+    all_payloads = {} # Store payload by chunk_id {chunk_id: payload}
+    opensearch_results_for_rrf = []
+    qdrant_results_for_rrf = []
+
     try:
         logger.info(f"Performing concurrent search in OpenSearch and Qdrant (fetching top {initial_fetch_k})...")
-        # Ensure clients are connected (add connect calls if client doesn't handle it internally on search)
         await asyncio.gather(opensearch_client.connect(), qdrant_client.connect())
 
+        # IMPORTANT ASSUMPTION: Clients now return List[Tuple[chunk_id, score, payload]]
+        # where payload contains 'content' and metadata fields.
         opensearch_results_task = opensearch_client.search_documents(
             query_text=query,
             k=initial_fetch_k,
@@ -769,86 +765,85 @@ async def search_documents(
         os_results_raw, qdrant_results_raw = await asyncio.gather(
             opensearch_results_task,
             qdrant_results_task,
-            return_exceptions=True # Allow one search to fail without stopping the other
+            return_exceptions=True
         )
 
-        # Handle potential errors from searches
-        opensearch_results = []
+        # Process OpenSearch results
         if isinstance(os_results_raw, Exception):
             logger.error(f"OpenSearch search failed: {os_results_raw}", exc_info=os_results_raw)
-            # Depending on requirements, could raise 500 or proceed with Qdrant results only
         elif os_results_raw:
-             opensearch_results = os_results_raw
-             logger.info(f"OpenSearch returned {len(opensearch_results)} results.")
+            logger.info(f"OpenSearch returned {len(os_results_raw)} raw results.")
+            for result in os_results_raw:
+                if len(result) == 3: # Expecting (chunk_id, score, payload)
+                    chunk_id, score, payload = result
+                    opensearch_results_for_rrf.append((chunk_id, score))
+                    if chunk_id not in all_payloads: # Keep the first seen payload
+                         all_payloads[chunk_id] = payload
+                else:
+                    logger.warning(f"Unexpected result format from OpenSearch: {result}")
 
-        qdrant_results = []
+        # Process Qdrant results
         if isinstance(qdrant_results_raw, Exception):
             logger.error(f"Qdrant search failed: {qdrant_results_raw}", exc_info=qdrant_results_raw)
-            # Depending on requirements, could raise 500 or proceed with OS results only
         elif qdrant_results_raw:
-            qdrant_results = qdrant_results_raw
-            logger.info(f"Qdrant returned {len(qdrant_results)} results.")
+            logger.info(f"Qdrant returned {len(qdrant_results_raw)} raw results.")
+            for result in qdrant_results_raw:
+                if len(result) == 3: # Expecting (chunk_id, score, payload)
+                    chunk_id, score, payload = result
+                    qdrant_results_for_rrf.append((chunk_id, score))
+                    if chunk_id not in all_payloads: # Keep the first seen payload
+                        all_payloads[chunk_id] = payload
+                else:
+                     logger.warning(f"Unexpected result format from Qdrant: {result}")
 
-        if not opensearch_results and not qdrant_results:
-             # If both failed, raise error
-             logger.error("Both OpenSearch and Qdrant searches failed.")
-             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Both search backends failed.")
+        if not opensearch_results_for_rrf and not qdrant_results_for_rrf:
+             logger.error("Both OpenSearch and Qdrant searches failed or returned no results.")
+             # Decide if 404 or 503 is appropriate. If searches failed, 503. If no results, return empty list.
+             # Let's return empty list for now, assuming no results found.
+             return {"query": query, "retrieved_count": 0, "results": []}
+             # raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Both search backends failed.")
 
     except Exception as e:
         logger.error(f"Error during search execution: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error performing search: {e}")
 
-
     # --- 3. Apply Reciprocal Rank Fusion ---
     logger.info("Applying Reciprocal Rank Fusion...")
-    # Assume client search methods return List[Tuple[doc_id, score]]
-    fused_scores = reciprocal_rank_fusion([opensearch_results, qdrant_results], rrf_k=rrf_k)
+    # Pass lists of (chunk_id, score) to RRF
+    fused_scores = reciprocal_rank_fusion([opensearch_results_for_rrf, qdrant_results_for_rrf], rrf_k=rrf_k)
 
     if not fused_scores:
         logger.info("No results found after fusion.")
-        return {"query": query, "results": []}
+        return {"query": query, "retrieved_count": 0, "results": []}
 
-    # Get the top K document IDs from the fused results
+    # Get the top K chunk IDs from the fused results
     top_k_fused_ids = list(fused_scores.keys())[:k]
-    logger.info(f"Top {len(top_k_fused_ids)} results after RRF: {top_k_fused_ids}")
+    logger.info(f"Top {len(top_k_fused_ids)} chunk IDs after RRF: {top_k_fused_ids}")
 
-
-    # --- 4. Fetch Metadata/Content for Top K Results (Optional but Recommended) ---
+    # --- 4. Construct Final Results with Content and Metadata ---
     final_results = []
-    if top_k_fused_ids: # and include_metadata:
-        logger.info("Fetching details for top results from OpenSearch...")
-        try:
-            # Assume OpenSearch client has a method to get docs by ID
-            # This might require searching specific indices or all relevant ones
-            fetched_details = await opensearch_client.get_documents_by_ids(
-                doc_ids=top_k_fused_ids,
-                doc_type=doc_type # Pass doc_type to potentially narrow down indices
-            )
-            # fetched_details should ideally be a dict: {doc_id: payload}
+    for chunk_id in top_k_fused_ids:
+        rrf_score = fused_scores[chunk_id]
+        payload = all_payloads.get(chunk_id)
 
-            # Combine details with RRF scores, maintaining the RRF rank order
-            for doc_id in top_k_fused_ids:
-                detail = fetched_details.get(doc_id)
-                if detail:
-                    final_results.append({
-                        "id": doc_id,
-                        "rrf_score": fused_scores[doc_id],
-                        "metadata": detail # The payload returned by get_documents_by_ids
-                    })
-                else:
-                     # Document ID from RRF was not found in OpenSearch fetch? Log warning.
-                     logger.warning(f"Could not fetch details for document ID from RRF: {doc_id}")
-                     # Optionally include anyway with just score?
-                     final_results.append({
-                         "id": doc_id,
-                         "rrf_score": fused_scores[doc_id],
-                         "metadata": None # Indicate details unavailable
-                     })
-
-        except Exception as e:
-            logger.error(f"Failed to fetch details for top results: {e}", exc_info=True)
-            # Fallback: return only IDs and scores if fetching fails
-            final_results = [{"id": doc_id, "rrf_score": fused_scores[doc_id], "metadata": None} for doc_id in top_k_fused_ids]
+        if payload:
+            # Assuming payload contains 'content' and other metadata fields
+            # Adapt the keys ('content', 'metadata_field_1', etc.) based on actual payload structure
+            final_results.append({
+                "id": chunk_id,
+                "rrf_score": rrf_score,
+                "content": payload.get('content', None), # Get chunk content
+                "metadata": {k: v for k, v in payload.items() if k != 'content'} # Get all other fields as metadata
+            })
+        else:
+            # This shouldn't happen if the payload was stored correctly, but handle defensively
+            logger.warning(f"Payload not found for chunk_id {chunk_id} after RRF. Skipping.")
+            final_results.append({
+                 "id": chunk_id,
+                 "rrf_score": rrf_score,
+                 "content": None,
+                 "metadata": None # Indicate data unavailable
+             })
 
     # --- 5. Return Final Ranked Results ---
     return {
