@@ -26,6 +26,7 @@ from indexing.document_classifier import classify
 from indexing.metadata_extractor import extract_metadata
 from indexing.models import DocumentType, FileType, models # <--- Import FileType
 from indexing.utils import calculate_file_hash
+from indexing.settings import *
 # Import OpenSearch mappings
 from storage.opensearch_mappings import mappings as opensearch_doc_mappings
 from qdrant_client import models as qdrant_models # Import qdrant models separately
@@ -51,13 +52,6 @@ except Exception as e:
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-# --- Configuration (Optional - can be moved to settings) ---
-TEMP_UPLOAD_DIR = tempfile.mkdtemp(prefix="fastapi_uploads_")
-MAX_CLASSIFICATION_SAMPLE_SIZE = 5000
-MAX_METADATA_SAMPLE_SIZE = 20000
-
 
 # --- Instantiate Clients ---
 qdrant_client = QdrantColbertClient()

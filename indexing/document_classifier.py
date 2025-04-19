@@ -9,18 +9,9 @@ from openai import AsyncOpenAI, APIError, RateLimitError, APIConnectionError
 from pydantic import BaseModel, ValidationError
 
 from indexing.models import DocumentType
-# We don't need the pydantic_ai Agent specific model import anymore
-# from indexing.settings import model # No longer needed directly here
+from indexing.settings import *
 
 logger = logging.getLogger(__name__)
-
-# --- Configuration (pulled from environment variables like in settings.py) ---
-# It's generally better practice to configure the client once, maybe in settings.py
-# and import the configured client, but for a direct replacement here, we'll re-read the env vars.
-# Ensure these env vars are set where this code runs.
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-3.5-turbo") # Provide a default if needed
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL") # Can be None if using default OpenAI
 
 # --- Instantiate OpenAI Client ---
 # Handle potential missing API key

@@ -5,17 +5,13 @@ import asyncio
 from typing import Type, Optional
 
 from indexing.models import DocumentType, models
+from indexing.settings import *
 from pydantic import BaseModel, ValidationError
 
 # Import OpenAI library
 from openai import AsyncOpenAI, APIError, RateLimitError, APIConnectionError
 
 logger = logging.getLogger(__name__)
-
-# --- Configuration (from environment variables) ---
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-3.5-turbo")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 
 # --- Instantiate OpenAI Client ---
 if not OPENAI_API_KEY:
